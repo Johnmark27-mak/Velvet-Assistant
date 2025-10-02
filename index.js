@@ -1,97 +1,85 @@
+// 🌐 Velvet Assistant WhatsApp Bot (Core + AI)
+// 📌 By John Odhiambo
 
-// === GROUP 1: Core WhatsApp Features ===
+import makeWASocket, { useMultiFileAuthState } from '@whiskeysockets/baileys'
+import P from 'pino'
+import axios from 'axios'
 
-// ✅ 1. Auto View Status
-sock.ev.on('messages.upsert', async ({ messages }) => {
-  const msg = messages[0]
-  if (msg.key.remoteJid.endsWith('status@broadcast')) {
-    try {
-      await sock.readMessages([msg.key])
-      console.log('👁️ Viewed a status automatically.')
-    } catch (e) {
-      console.log('⚠️ Auto-view error:', e.message)
-    }
-  }
-})
-
-// 🗑️ 2. Anti-Delete Messages
-sock.ev.on('messages.update', async (updates) => {
-  for (const update of updates) {
-    if (update.message === null && update.key.fromMe === false) {
-      const jid = update.key.remoteJid
-      const deletedKey = update.key.id
-      await sock.sendMessage(jid, { text: `🛑 *Anti-Delete*\nSomeone deleted a message (ID: ${deletedKey})` })
-      console.log(`🗑️ Deleted message detected from ${jid}`)
-    }
-  }
-})
-
-// 🖼 3. Save “View Once” Media
-sock.ev.on('messages.upsert', async ({ messages }) => {
-  const m = messages[0]
-  const msgContent = m.message?.viewOnceMessage?.message
-  if (msgContent) {
-    const type = Object.keys(msgContent)[0]
-    await sock.sendMessage(m.key.remoteJid, {
-      [type]: msgContent[type],
-      caption: '🔁 Saved View Once Media'
-    })
-    console.log('🖼 Saved a View Once image/video.')
-  }
-})
-
-// 🌐 4. Always Online
-setInterval(() => {
-  if (sock?.user) {
-    sock.sendPresenceUpdate('available')
-  }
-}, 30000)
-
-// ✍ 5. Fake Typing
-async function fakeTyping(jid) {
-  await sock.sendPresenceUpdate('composing', jid)
-  setTimeout(() => sock.sendPresenceUpdate('paused', jid), 5000)
-}
-
-// 🎙 6. Fake Recording
-async function fakeRecording(jid) {
-  await sock.sendPresenceUpdate('recording', jid)
-  setTimeout(() => sock.sendPresenceUpdate('paused', jid), 5000)
-}
-
-// ❤️ 7. Auto Like Status (Just reacts with ❤️ when viewing)
-sock.ev.on('messages.upsert', async ({ messages }) => {
-  const msg = messages[0]
-  if (msg.key.remoteJid.endsWith('status@broadcast')) {
-    try {
-      await sock.sendMessage(msg.key.remoteJid, {
-        react: { text: '❤️', key: msg.key }
-      })
-      console.log('❤️ Auto-liked a status')
-    } catch (e) {
-      console.log('Auto-like error:', e.message)
-    }
-  }
-})
-
-// ✅ 8. Auto Blue Ticks (marks all chats as read)
-setInterval(async () => {
+// === AI Utility Functions ===
+async function askAI(prompt) {
   try {
-    const chats = await sock.chatModify({ markRead: true })
-    console.log('✅ Marked chats as read')
-  } catch (e) {
-    // ignore errors silently
-  }
-}, 60000)
-
-// 💬 9. Auto React to Texts
-sock.ev.on('messages.upsert', async ({ messages }) => {
-  const msg = messages[0]
-  if (msg.message?.conversation && !msg.key.fromMe) {
-    const reaction = ['😂','🔥','❤️','👍','😎','🤖'][Math.floor(Math.random()*6)]
-    await sock.sendMessage(msg.key.remoteJid, {
-      react: { text: reaction, key: msg.key }
+    const res = await axios.post('https://api.gpt4free.online/v1/chat/completions', {
+      model: 'gpt-4',
+      messages: [{ role: 'user', content: prompt }]
     })
-    console.log(`💬 Auto-reacted with ${reaction}`)
+    return res.data.choices[0].message.content
+  } catch (err) {
+    console.log('❌ AI error:', err.message)
+    return '⚠️ AI is currently unavailable.'
   }
-})
+}
+
+async function summarizeText(text) {
+  return await askAI(`Summarize this text in simple bullet points:\n\n${text}`)
+}
+
+async function translateText(text, lang) {
+  return await askAI(`Translate this text into ${lang}:\n\n${text}`)
+}
+
+// === BOT CONNECTION ===
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('./session')
+  const sock = makeWASocket({
+    printQRInTerminal: true,
+    auth: state,
+    logger: P({ level: 'silent' })
+  })
+
+  sock.ev.on('creds.update', saveCreds)
+
+  sock.ev.on('messages.upsert', async (m) => {
+    const msg = m.messages[0]
+    if (!msg.message || msg.key.fromMe) return
+
+    const from = msg.key.remoteJid
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
+    const lower = text.toLowerCase().trim()
+
+    // 🧠 AI Chat Command
+    if (lower.startsWith('.ai')) {
+      const prompt = text.replace('.ai', '').trim()
+      if (!prompt) return sock.sendMessage(from, { text: '✍️ Please provide a prompt.' })
+      const reply = await askAI(prompt)
+      return sock.sendMessage(from, { text: reply })
+    }
+
+    // 📝 Summarize Command
+    if (lower.startsWith('.summarize')) {
+      const content = text.replace('.summarize', '').trim()
+      if (!content) return sock.sendMessage(from, { text: '✍️ Please provide text to summarize.' })
+      const summary = await summarizeText(content)
+      return sock.sendMessage(from, { text: `📝 *Summary:*\n${summary}` })
+    }
+
+    // 🌍 Translate Command
+    if (lower.startsWith('.translate')) {
+      const parts = text.split(' ')
+      if (parts.length < 3) {
+        return sock.sendMessage(from, { text: 'Usage: `.translate <lang> <text>`' })
+      }
+      const lang = parts[1]
+      const content = text.replace(`.translate ${lang}`, '').trim()
+      const translated = await translateText(content, lang)
+      return sock.sendMessage(from, { text: `🌍 *Translated (${lang}):*\n${translated}` })
+    }
+
+    // 🤖 Auto AI Reply for normal messages
+    if (text && !text.startsWith('.')) {
+      const reply = await askAI(text)
+      await sock.sendMessage(from, { text: reply })
+    }
+  })
+}
+
+startBot()
